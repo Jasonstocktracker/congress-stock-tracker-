@@ -1,90 +1,92 @@
 import streamlit as st
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 
 st.title("🗳️ Congress Stock Trades Tracker")
-st.caption("Data from public House & Senate Stock Watcher • Not financial advice")
+st.caption("Fallback scraper from Capitol Trades • Not financial advice • Up to 45-day disclosure delay")
 
-@st.cache_data(ttl=1800)  # Refresh every 30 minutes
+@st.cache_data(ttl=1800)  # Cache 30 minutes
 def load_data():
-    try:
-        house_url = "https://housestockwatcher.com/api"
-        senate_url = "https://senatestockwatcher.com/api"
-        
-        house_resp = requests.get(house_url, timeout=10)
-        senate_resp = requests.get(senate_url, timeout=10)
-        
-        if not house_resp.ok:
-            st.warning(f"House API returned status {house_resp.status_code}")
-            house = pd.DataFrame()
-        else:
-            house = pd.DataFrame(house_resp.json())
-        
-        if not senate_resp.ok:
-            st.warning(f"Senate API returned status {senate_resp.status_code}")
-            senate = pd.DataFrame()
-        else:
-            senate = pd.DataFrame(senate_resp.json())
-        
-        # Add chamber
-        if not house.empty:
-            house["chamber"] = "House"
-        if not senate.empty:
-            senate["chamber"] = "Senate"
-        
-        df = pd.concat([house, senate], ignore_index=True)
-        
-        # Standardize date
-        if "transaction_date" in df.columns:
-            df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
-        elif "TransactionDate" in df.columns:
-            df["transaction_date"] = pd.to_datetime(df["TransactionDate"], errors="coerce")
+    # Try old watchers first (quick timeout)
+    df_list = []
+    for name, url in [("House", "https://housestockwatcher.com/api"), ("Senate", "https://senatestockwatcher.com/api")]:
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.ok:
+                temp = pd.DataFrame(resp.json())
+                temp["source"] = name
+                df_list.append(temp)
+                st.success(f"Loaded from {name} watcher")
+        except:
+            pass  # silent if down
+
+    # Main fallback: Scrape Capitol Trades latest trades
+    if not df_list:
+        try:
+            st.info("Using Capitol Trades scraper for recent trades...")
+            url = "https://www.capitoltrades.com/trades"
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; CongressTrackerApp/1.0)"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            
+            soup = BeautifulSoup(resp.text, "html.parser")
+            tables = soup.find_all("table")
+            
+            if tables:
+                # Read the first main trades table
+                cap_df = pd.read_html(str(tables[0]))[0]
+                cap_df["source"] = "Capitol Trades"
+                df_list.append(cap_df)
+                st.success(f"Loaded {len(cap_df)} recent trades from Capitol Trades")
+            else:
+                st.warning("No table found on Capitol Trades page")
+        except Exception as e:
+            st.error(f"Scrape failed: {str(e)[:200]}")
+
+    if df_list:
+        df = pd.concat(df_list, ignore_index=True)
+        # Try to find a date column and standardize
+        date_cols = [col for col in df.columns if any(k in str(col).lower() for k in ["traded", "date", "published", "filed"])]
+        if date_cols:
+            df["transaction_date"] = pd.to_datetime(df[date_cols[0]], errors="coerce")
         else:
             df["transaction_date"] = pd.NaT
-        
         return df
-    except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 df = load_data()
 
 if df.empty:
-    st.warning("⚠️ Could not load data right now. The public APIs may be temporarily down. Try refreshing the page in a few minutes.")
-    st.info("Alternative: FMP congressional data now requires a paid plan on the free tier.")
+    st.warning("⚠️ Still no data. Capitol Trades may have changed structure or be temporarily blocked.")
+    st.info("Try refreshing in 30 minutes. As a last resort, you can manually visit https://www.capitoltrades.com/trades and copy data.")
     st.stop()
 
 # Filters
 col1, col2, col3 = st.columns(3)
 with col1:
-    chamber = st.multiselect("Chamber", ["House", "Senate"], default=["House", "Senate"])
+    sources = st.multiselect("Source", options=df["source"].unique().tolist(), default=df["source"].unique().tolist())
 with col2:
-    pol_filter = st.text_input("Politician name (e.g., Pelosi, Cruz)")
+    pol_filter = st.text_input("Politician (e.g., Pfluger, Larsen, Pelosi)")
 with col3:
-    ticker_filter = st.text_input("Stock ticker (e.g., NVDA, AAPL)")
+    ticker_filter = st.text_input("Ticker or Issuer (e.g., UHAL, BRK/B, AXP)")
 
-filtered = df.copy()
-if chamber:
-    filtered = filtered[filtered["chamber"].isin(chamber)]
+filtered = df[df["source"].isin(sources)] if not df.empty else df
 
 if pol_filter and not filtered.empty:
-    name_col = next((col for col in ["representative", "Senator", "name"] if col in filtered.columns), None)
-    if name_col:
-        filtered = filtered[filtered[name_col].str.contains(pol_filter, case=False, na=False)]
+    name_cols = [c for c in filtered.columns if any(k in str(c).lower() for k in ["politician", "name"])]
+    if name_cols:
+        filtered = filtered[filtered[name_cols[0]].astype(str).str.contains(pol_filter, case=False, na=False)]
 
 if ticker_filter and not filtered.empty:
-    ticker_col = next((col for col in ["ticker", "symbol"] if col in filtered.columns), None)
-    if ticker_col:
-        filtered = filtered[filtered[ticker_col].str.contains(ticker_filter, case=False, na=False)]
+    ticker_cols = [c for c in filtered.columns if any(k in str(c).lower() for k in ["ticker", "issuer", "symbol"])]
+    if ticker_cols:
+        filtered = filtered[filtered[ticker_cols[0]].astype(str).str.contains(ticker_filter, case=False, na=False)]
 
-# Show table
-display_cols = [col for col in ["chamber", "representative", "Senator", "ticker", "transaction_date", 
-                                "transaction_type", "amount", "asset_description"] 
-                if col in filtered.columns]
-
+# Show available columns
 st.dataframe(
-    filtered[display_cols].sort_values("transaction_date", ascending=False),
+    filtered.sort_values("transaction_date", ascending=False) if "transaction_date" in filtered.columns else filtered,
     use_container_width=True
 )
 
-st.info("💡 Data usually updates daily but has disclosure delays (up to 45 days). Tap column headers to sort.")
+st.info("💡 Data from public sources. Always cross-check official filings at disclosures-clerk.house.gov or efdsearch.senate.gov.")
