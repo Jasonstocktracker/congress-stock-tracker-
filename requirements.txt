@@ -3,3 +3,5 @@ requests
 streamlit
 yfinance
 plotly
+beautifulsoup4
+lxml
