@@ -2,22 +2,29 @@ import streamlit as st
 import pandas as pd
 import requests
 
-# ================== CONFIG ==================
-FMP_API_KEY = "HqzTGhnPIFYXS3O1VWOiOq7WZexJEJ9R"   # Your key is safely inside quotes here
+st.title("🗳️ Congress Stock Trades Tracker")
+st.caption("Data from public House & Senate Stock Watcher • Not financial advice")
 
-# Correct FMP endpoints for latest disclosures (these work with free tier)
-HOUSE_URL = f"https://financialmodelingprep.com/stable/house-latest?apikey={FMP_API_KEY}&limit=100"
-SENATE_URL = f"https://financialmodelingprep.com/stable/senate-latest?apikey={FMP_API_KEY}&limit=100"
-# ===========================================
-
-@st.cache_data(ttl=3600)  # Refresh every hour
+@st.cache_data(ttl=1800)  # Refresh every 30 minutes
 def load_data():
     try:
-        house_resp = requests.get(HOUSE_URL)
-        senate_resp = requests.get(SENATE_URL)
+        house_url = "https://housestockwatcher.com/api"
+        senate_url = "https://senatestockwatcher.com/api"
         
-        house = pd.DataFrame(house_resp.json() if house_resp.ok else [])
-        senate = pd.DataFrame(senate_resp.json() if senate_resp.ok else [])
+        house_resp = requests.get(house_url, timeout=10)
+        senate_resp = requests.get(senate_url, timeout=10)
+        
+        if not house_resp.ok:
+            st.warning(f"House API returned status {house_resp.status_code}")
+            house = pd.DataFrame()
+        else:
+            house = pd.DataFrame(house_resp.json())
+        
+        if not senate_resp.ok:
+            st.warning(f"Senate API returned status {senate_resp.status_code}")
+            senate = pd.DataFrame()
+        else:
+            senate = pd.DataFrame(senate_resp.json())
         
         # Add chamber
         if not house.empty:
@@ -25,30 +32,26 @@ def load_data():
         if not senate.empty:
             senate["chamber"] = "Senate"
         
-        # Combine
         df = pd.concat([house, senate], ignore_index=True)
         
-        # Standardize date column (FMP uses different names sometimes)
-        date_cols = ["transactionDate", "filingDate", "date"]
-        for col in date_cols:
-            if col in df.columns:
-                df["transaction_date"] = pd.to_datetime(df[col], errors="coerce")
-                break
+        # Standardize date
+        if "transaction_date" in df.columns:
+            df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
+        elif "TransactionDate" in df.columns:
+            df["transaction_date"] = pd.to_datetime(df["TransactionDate"], errors="coerce")
         else:
             df["transaction_date"] = pd.NaT
         
         return df
     except Exception as e:
-        st.error(f"Failed to load data: {str(e)}")
+        st.error(f"Error loading data: {str(e)}")
         return pd.DataFrame()
 
 df = load_data()
 
-st.title("🗳️ Congress Stock Trades Tracker")
-st.caption("Data from Financial Modeling Prep • Not financial advice")
-
 if df.empty:
-    st.warning("⚠️ No data loaded. Check your API key or try refreshing the app.")
+    st.warning("⚠️ Could not load data right now. The public APIs may be temporarily down. Try refreshing the page in a few minutes.")
+    st.info("Alternative: FMP congressional data now requires a paid plan on the free tier.")
     st.stop()
 
 # Filters
@@ -61,31 +64,27 @@ with col3:
     ticker_filter = st.text_input("Stock ticker (e.g., NVDA, AAPL)")
 
 filtered = df.copy()
-
 if chamber:
     filtered = filtered[filtered["chamber"].isin(chamber)]
 
 if pol_filter and not filtered.empty:
-    name_cols = ["name", "representative", "senator", "politician"]
-    name_col = next((col for col in name_cols if col in filtered.columns), None)
+    name_col = next((col for col in ["representative", "Senator", "name"] if col in filtered.columns), None)
     if name_col:
         filtered = filtered[filtered[name_col].str.contains(pol_filter, case=False, na=False)]
 
 if ticker_filter and not filtered.empty:
-    ticker_cols = ["ticker", "symbol"]
-    ticker_col = next((col for col in ticker_cols if col in filtered.columns), None)
+    ticker_col = next((col for col in ["ticker", "symbol"] if col in filtered.columns), None)
     if ticker_col:
         filtered = filtered[filtered[ticker_col].str.contains(ticker_filter, case=False, na=False)]
 
-# Display columns that actually exist
-display_cols = [col for col in ["chamber", "name", "representative", "senator", "politician", 
-                                "ticker", "symbol", "transaction_date", "transactionType", 
-                                "type", "amount", "assetDescription", "description", "asset"] 
+# Show table
+display_cols = [col for col in ["chamber", "representative", "Senator", "ticker", "transaction_date", 
+                                "transaction_type", "amount", "asset_description"] 
                 if col in filtered.columns]
 
 st.dataframe(
-    filtered[display_cols].sort_values("transaction_date", ascending=False) if not filtered.empty else filtered,
+    filtered[display_cols].sort_values("transaction_date", ascending=False),
     use_container_width=True
 )
 
-st.info("💡 Data has up to 45-day disclosure delay. Tap any column header to sort.")
+st.info("💡 Data usually updates daily but has disclosure delays (up to 45 days). Tap column headers to sort.")
