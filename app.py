@@ -1,55 +1,83 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime
 
-# Fetch data from free public APIs
+# ================== CONFIG ==================
+# Paste your FMP API key here:
+FMP_API_KEY = "YOUR_FMP_API_KEY_HERE"   # ← Change this!
+
+HOUSE_URL = f"https://financialmodelingprep.com/stable/house-trading?apikey={FMP_API_KEY}"
+SENATE_URL = f"https://financialmodelingprep.com/stable/senate-trading?apikey={FMP_API_KEY}"
+# ===========================================
+
 @st.cache_data(ttl=3600)  # Refresh every hour
 def load_data():
-    house_url = "https://housestockwatcher.com/api"
-    senate_url = "https://senatestockwatcher.com/api"
-    
-    house = pd.DataFrame(requests.get(house_url).json())
-    senate = pd.DataFrame(requests.get(senate_url).json())
-    
-    # Standardize columns
-    for df, body in zip([house, senate], ["House", "Senate"]):
-        df["chamber"] = body
-        if "transaction_date" in df.columns:
-            df["transaction_date"] = pd.to_datetime(df["transaction_date"])
-        elif "TransactionDate" in df.columns:
-            df["transaction_date"] = pd.to_datetime(df["TransactionDate"])
-    
-    return pd.concat([house, senate], ignore_index=True)
+    try:
+        house = pd.DataFrame(requests.get(HOUSE_URL).json())
+        senate = pd.DataFrame(requests.get(SENATE_URL).json())
+        
+        # Add chamber column
+        if not house.empty:
+            house["chamber"] = "House"
+        if not senate.empty:
+            senate["chamber"] = "Senate"
+        
+        # Combine
+        df = pd.concat([house, senate], ignore_index=True)
+        
+        # Standardize date column if needed
+        if "transactionDate" in df.columns:
+            df["transaction_date"] = pd.to_datetime(df["transactionDate"], errors="coerce")
+        elif "filingDate" in df.columns:
+            df["transaction_date"] = pd.to_datetime(df["filingDate"], errors="coerce")
+        else:
+            df["transaction_date"] = pd.NaT
+        
+        return df
+    except Exception as e:
+        st.error(f"Failed to load data: {e}")
+        return pd.DataFrame()
 
 df = load_data()
 
 st.title("🗳️ Congress Stock Trades Tracker")
-st.caption("Data from House & Senate Stock Watcher • Updated daily • Not financial advice")
+st.caption("Data from Financial Modeling Prep • Free tier • Not financial advice")
+
+if df.empty:
+    st.warning("No data loaded yet. Check your API key and try refreshing.")
+    st.stop()
 
 # Filters
 col1, col2, col3 = st.columns(3)
 with col1:
     chamber = st.multiselect("Chamber", ["House", "Senate"], default=["House", "Senate"])
 with col2:
-    pol_filter = st.text_input("Politician name (e.g., Pelosi, Cruz)")
+    pol_filter = st.text_input("Politician name (e.g., Pelosi)")
 with col3:
-    ticker_filter = st.text_input("Stock ticker (e.g., NVDA, AAPL)")
+    ticker_filter = st.text_input("Stock ticker (e.g., NVDA)")
 
 filtered = df.copy()
 if chamber:
     filtered = filtered[filtered["chamber"].isin(chamber)]
-if pol_filter:
-    filtered = filtered[filtered.get("representative", filtered.get("Senator", "")).str.contains(pol_filter, case=False, na=False)]
-if ticker_filter:
-    filtered = filtered[filtered.get("ticker", "").str.contains(ticker_filter, case=False, na=False)]
+if pol_filter and not filtered.empty:
+    # FMP uses different column names; try common ones
+    name_col = next((col for col in ["representative", "senator", "name", "politician"] if col in filtered.columns), None)
+    if name_col:
+        filtered = filtered[filtered[name_col].str.contains(pol_filter, case=False, na=False)]
+if ticker_filter and not filtered.empty:
+    ticker_col = next((col for col in ["ticker", "symbol"] if col in filtered.columns), None)
+    if ticker_col:
+        filtered = filtered[filtered[ticker_col].str.contains(ticker_filter, case=False, na=False)]
 
-# Display table
+# Show table
+display_cols = [col for col in ["chamber", "name", "representative", "senator", "politician", 
+                                "ticker", "symbol", "transaction_date", "transactionType", 
+                                "type", "amount", "assetDescription", "description"] 
+                if col in filtered.columns]
+
 st.dataframe(
-    filtered[["chamber", "representative" if "representative" in filtered.columns else "Senator", 
-              "ticker", "transaction_date", "transaction_type", "amount", "asset_description"]]
-    .sort_values("transaction_date", ascending=False),
+    filtered[display_cols].sort_values("transaction_date", ascending=False),
     use_container_width=True
 )
 
-st.info("Tip: Tap column headers to sort. Data has disclosure delays.")
+st.info("💡 Data has disclosure delays (up to 45 days). Tap column headers to sort.")
